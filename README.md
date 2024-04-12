@@ -5,13 +5,13 @@ This is a program implemented quick and dirty to generate dependency graphs for 
 
 An example of why this may be useful:
 
-![]()
+![graph-apps](https://github.com/balsamiq/bik-grapher/assets/314398/070306fd-21f8-4f18-9059-310594bff5ee)
 
 Above graph shows circular dependencies (🔵 nodes have dependencies, 🟢 have no dependencies, and 🔴 have circular dependencies) when you look at an "app-level." This means, you wouldn't be able to deploy BAS and RTC with all their stacks all at once, as they [circularly] depend on each other.
 
 However, if you look at BAS and RTCs individual stacks in more detail;
 
-![]()
+![graph-stacks](https://github.com/balsamiq/bik-grapher/assets/314398/49bc4adc-6229-4bad-9ea2-db578a05bbe6)
 
 You can see there's a viable deployment path for these two apps:
 
