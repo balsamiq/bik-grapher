@@ -43,14 +43,14 @@ nvm use && npm start staging -- --help
 
 ## About caching
 
-A `cache/` folder will be generated for you for the first time you run this program. This is an optimization when you wan't to send requests to AWS APIs in each run. If you need to fetch fresh data, either because there are changes in live CloudFormation since the last time you fetched'em, or because you want to fetch data from a different AWS account or region, then you should delete this folder before running the program again.
+A `cache/` folder will be generated for you for the first time you run this program. This is an optimization when you don't want to send requests to AWS APIs in each run. If you need to fetch fresh data, either because there are changes in CloudFormation since your last fetch, or because you want to fetch data from a different AWS account or region, then you should delete `cache/` folder before running the program again.
 
 
 ## Usage examples
 
-In the examples below you'll need to specify your own AWS credentials either via `AWS_PROFILE` or `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables, as well as specify the region you want to query via `AWS_REGION`.
+In the examples below you'll need to specify your own AWS credentials either via `AWS_PROFILE` or `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY` environment variables, as well as specifying the region you want to query via `AWS_REGION`.
 
-This program doesn't clean cache files (`cache/`) or artifacts (`.output/`) it generates on purpose, so in most cases it it recommended you do that instead, as seen in below examples.
+This program doesn't clean cache files (`cache/`) or artifacts (`.output/`) it generates on purpose, so in most cases it is recommended you do that instead, as seen in below examples. (See [Advanced usage examples](#advanced-usage-examples) for other use cases where you may not want to clean the artifacts, for example.)
 
 For more than one app, this program will generate `graph-apps.png` and `graph-stacks.png` files, whilst for a single app it will generate only the `graph-stacks.png`.
 
@@ -75,28 +75,28 @@ rm -rf .cache/ .output/ *.png ; nvm use && AWS_PROFILE=b-production-products AWS
 
 ## Advanced usage examples
 
-Under the hood we're using [Madge](https://www.npmjs.com/package/madge), so once you generated the artifacts (i.e., `.output/`) you can use any other Madge command to generate other types of graphs.
+Under the hood we're using [Madge](https://www.npmjs.com/package/madge), so once you generated the artifacts (i.e., `.output/`) you can use `madge` command to generate other types of graphs.
 
 See things that you can do:
 
 ```
-nvm use && npx madge --help
+npx madge --help
 ```
 
 Show circular stack dependencies:
 
 ```
-nvm use && npx madge --circular .output/stacks/
+npx madge --circular .output/stacks/
 ```
 
 Output apps dependencies as JSON:
 
 ```
-nvm use && npx madge --circular .output/apps/
+npx madge --circular .output/apps/
 ```
 
-Use a different format (JPEG) and layout engine for image:
+Use a different format and layout engine for the graph-image:
 
 ```
-nvm use && npx madge --image example.jpg --layout neato .output/apps/
+npx madge --image example.jpg --layout neato .output/apps/
 ```
