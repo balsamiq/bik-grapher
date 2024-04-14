@@ -2,12 +2,9 @@ import {
   CloudFormationClient,
   CloudFormationServiceException,
   DescribeStacksCommand,
-  DescribeStacksCommandOutput,
   Export,
   ListExportsCommand,
-  ListExportsCommandOutput,
   ListImportsCommand,
-  ListImportsCommandOutput,
   Stack,
 } from "@aws-sdk/client-cloudformation";
 import { program } from "commander";
