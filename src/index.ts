@@ -13,12 +13,99 @@ import {
 import { program } from "commander";
 import { appendFile, mkdir, readFile, writeFile } from "fs/promises";
 import madge from "madge";
-import * as path from "path";
+import { join as joinPath } from "path";
 
 const CACHE_DIR = ".cache";
 const OUTPUT_BASEDIR = ".output";
-const APP_OUTPUT_DIR = path.join(OUTPUT_BASEDIR, "apps");
-const STACK_OUTPUT_DIR = path.join(OUTPUT_BASEDIR, "stacks");
+const APP_OUTPUT_DIR = joinPath(OUTPUT_BASEDIR, "apps");
+const STACK_OUTPUT_DIR = joinPath(OUTPUT_BASEDIR, "stacks");
+
+class CloudFormation {
+  constructor(private cfClient: CloudFormationClient) {}
+
+  describeStacks() {
+    return this.consumeAllTokens(DescribeStacksCommand, "Stacks") as Promise<Stack[]>;
+  }
+
+  listExports() {
+    return this.consumeAllTokens(ListExportsCommand, "Exports") as Promise<Export[]>;
+  }
+
+  async listImports(exportName: string) {
+    try {
+      return (await this.consumeAllTokens(ListImportsCommand, "Imports", { ExportName: exportName })) as string[];
+    } catch (error) {
+      if (
+        error instanceof CloudFormationServiceException &&
+        error.message == `Export '${exportName}' is not imported by any stack.`
+      ) {
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  private async consumeAllTokens<T, TCommand extends { new (args: any): any }>(
+    Command: TCommand,
+    resultProp: string,
+    commandArgs?: object,
+  ): Promise<T[]> {
+    const result: T[] = [];
+
+    let nextToken: string | undefined;
+    do {
+      let partialResults: T[] | undefined;
+      const command = new Command({ ...commandArgs, NextToken: nextToken });
+      ({ [resultProp]: partialResults, NextToken: nextToken } = (await this.cfClient.send(command)) as any);
+      if (partialResults) {
+        result.push(...partialResults);
+      }
+    } while (nextToken);
+
+    return result;
+  }
+}
+
+interface Cache {
+  cacheOrWork<T>(key: string, work: () => T): Promise<T>;
+}
+
+class FilesystemCache implements Cache {
+  constructor(private cacheDir: string) {
+    mkdir(cacheDir, { recursive: true });
+  }
+
+  async cacheOrWork<T>(path: string, work: () => T): Promise<T> {
+    const cacheFileName = joinPath(this.cacheDir, path);
+
+    const cacheContents = await FilesystemCache._readFileOrNull(cacheFileName);
+    if (cacheContents) {
+      return JSON.parse(cacheContents);
+    }
+
+    const result = await work();
+    writeFile(cacheFileName, JSON.stringify(result, null, 2));
+    return result;
+  }
+
+  private static async _readFileOrNull(path: Parameters<typeof readFile>["0"]) {
+    try {
+      return await readFile(path, "utf8");
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        "syscall" in error &&
+        error.syscall === "open" &&
+        "code" in error &&
+        error.code == "ENOENT"
+      ) {
+        return null;
+      }
+
+      throw error;
+    }
+  }
+}
 
 async function main() {
   let environment = ""; // making typescript happy
@@ -36,22 +123,29 @@ async function main() {
 
   const { app: apps }: { app?: string[] } = program.opts();
 
-  await mkdir(CACHE_DIR, { recursive: true });
-  await mkdir(APP_OUTPUT_DIR, { recursive: true });
-  await mkdir(STACK_OUTPUT_DIR, { recursive: true });
+  mkdir(APP_OUTPUT_DIR, { recursive: true });
+  mkdir(STACK_OUTPUT_DIR, { recursive: true });
 
-  const cfClient = new CloudFormationClient({
-    maxAttempts: 10, // I increased this number, because the default (3) was not enough and was causing "Throttling: Rate exceeded" error
-  });
+  const cache = new FilesystemCache(CACHE_DIR);
+  const cloudFormation = new CloudFormation(
+    new CloudFormationClient({
+      maxAttempts: 10, // I increased this number, because the default (3) was not enough and was causing "Throttling: Rate exceeded" error
+    }),
+  );
 
-  const stacks = await getStacks(cfClient);
-  const exportsWithImportingStacks = await getExportsWithImportingStacks(await cfListExports(cfClient), cfClient);
+  const stacks = await getStacks(cache, cloudFormation);
+  const exportsWithImportingStacks = await getExportsWithImportingStacks(
+    await cache.cacheOrWork("exports.cache.json", async () => await cloudFormation.listExports()),
+    cache,
+    cloudFormation,
+  );
 
-  for (const stack of [...stacks.values()].filter((stack) => isInterestingStack(stack, environment, apps))) {
+  const interestingStacks = [...stacks.values()].filter((stack) => isInterestingStack(stack, environment, apps));
+  for (const stack of interestingStacks) {
     if (!apps || apps.length > 1) {
-      writeFile(path.join(APP_OUTPUT_DIR, `${getNodeNameForApp(stack)}.js`), "");
+      writeFile(joinPath(APP_OUTPUT_DIR, `${getNodeNameForApp(stack)}.js`), "");
     }
-    writeFile(path.join(STACK_OUTPUT_DIR, `${getNodeNameForStack(stack)}.js`), "");
+    writeFile(joinPath(STACK_OUTPUT_DIR, `${getNodeNameForStack(stack)}.js`), "");
   }
 
   for (const { export: eexport, imports } of exportsWithImportingStacks) {
@@ -85,7 +179,7 @@ async function main() {
         (exportingNode = getNodeNameForApp(exportingStack)) != (importingNode = getNodeNameForApp(importingStack))
       ) {
         appendFile(
-          path.join(APP_OUTPUT_DIR, `${importingNode}.js`),
+          joinPath(APP_OUTPUT_DIR, `${importingNode}.js`),
           `require('./${exportingNode}'); // ${eexport.Name}\n`,
         );
       }
@@ -94,7 +188,7 @@ async function main() {
         (exportingNode = getNodeNameForStack(exportingStack)) != (importingNode = getNodeNameForStack(importingStack))
       ) {
         appendFile(
-          path.join(STACK_OUTPUT_DIR, `${importingNode}.js`),
+          joinPath(STACK_OUTPUT_DIR, `${importingNode}.js`),
           `require('./${exportingNode}'); // ${eexport.Name}\n`,
         );
       }
@@ -109,8 +203,6 @@ async function main() {
   const graph = await madge(STACK_OUTPUT_DIR);
   graph.image(`graph-stacks.png`);
 }
-
-main();
 
 function getNodeNameForApp(stack: Stack) {
   const appName = getTagValue(stack, "balsamiq-product");
@@ -149,84 +241,22 @@ function getTagValue(stack: Stack, key: string) {
   return tag.Value;
 }
 
-async function getExportsWithImportingStacks(exports: Export[], cfClient: CloudFormationClient) {
+async function getExportsWithImportingStacks(exports: Export[], cache: Cache, cfClient: CloudFormation) {
   const result: { export: Export; imports: string[] }[] = [];
   for (const eexport of exports) {
-    if (!eexport.Name) {
-      // This should never happen, but just in case:
-      throw new Error(`Invalid export '${eexport}'`);
-    }
-
     result.push({
       export: eexport,
-      imports: await cfListImports(eexport.Name, cfClient),
+      imports: await cache.cacheOrWork(`cfListImports-${eexport.Name}`, () => {
+        if (!eexport.Name) {
+          // This should never happen, but just in case:
+          throw new Error(`Invalid export '${eexport}'`);
+        }
+        return cfClient.listImports(eexport.Name);
+      }),
     });
   }
 
   return result;
-}
-
-async function cfListImports(exportName: string, cfClient: CloudFormationClient) {
-  const cacheFileName = path.join(CACHE_DIR, `imports-${exportName}.cache.json`);
-
-  let allImports: string[] | null;
-  if ((allImports = await parseJSONFileOrNull(cacheFileName))) {
-    return allImports;
-  }
-
-  allImports = [];
-
-  let nextToken: ListImportsCommandOutput["NextToken"];
-  do {
-    let imports: ListImportsCommandOutput["Imports"];
-    const command = new ListImportsCommand({
-      ExportName: exportName,
-      NextToken: nextToken,
-    });
-    try {
-      ({ Imports: imports, NextToken: nextToken } = await cfClient.send(command));
-    } catch (error) {
-      if (
-        error instanceof CloudFormationServiceException &&
-        error.message == `Export '${exportName}' is not imported by any stack.`
-      ) {
-        return [];
-      }
-
-      throw error;
-    }
-
-    if (imports) {
-      allImports.push(...imports);
-    }
-  } while (nextToken);
-
-  writeFile(cacheFileName, JSON.stringify(allImports, null, 2));
-  return allImports;
-}
-
-async function cfListExports(cfClient: CloudFormationClient) {
-  const cacheFile = path.join(CACHE_DIR, "exports.cache.json");
-
-  let allExports: Export[] | null;
-  if ((allExports = await parseJSONFileOrNull(cacheFile))) {
-    return allExports;
-  }
-
-  allExports = [];
-
-  let nextToken: ListExportsCommandOutput["NextToken"];
-  do {
-    let exports: ListExportsCommandOutput["Exports"];
-    const command = new ListExportsCommand({ NextToken: nextToken });
-    ({ Exports: exports, NextToken: nextToken } = await cfClient.send(command));
-    if (exports) {
-      allExports.push(...exports);
-    }
-  } while (nextToken);
-
-  writeFile(cacheFile, JSON.stringify(allExports, null, 2));
-  return allExports;
 }
 
 function isInterestingStack(stack: Stack, environment: string, apps?: string[]) {
@@ -256,8 +286,8 @@ function isInterestingStack(stack: Stack, environment: string, apps?: string[]) 
   );
 }
 
-async function getStacks(cfClient: CloudFormationClient) {
-  const stacks = await cfDescribeStacks(cfClient);
+async function getStacks(cache: Cache, cfClient: CloudFormation) {
+  const stacks = await cache.cacheOrWork("stacks.cache.json", async () => await cfClient.describeStacks());
 
   const result = stacks.reduce((result, stack) => {
     if (!stack.StackId || !stack.StackName) {
@@ -273,44 +303,4 @@ async function getStacks(cfClient: CloudFormationClient) {
   return result;
 }
 
-async function cfDescribeStacks(cfClient: CloudFormationClient) {
-  const cacheFile = path.join(CACHE_DIR, "stacks.cache.json");
-
-  let allStacks: Stack[] | null;
-  if ((allStacks = await parseJSONFileOrNull(cacheFile))) {
-    return allStacks;
-  }
-
-  allStacks = [];
-
-  let nextToken: DescribeStacksCommandOutput["NextToken"];
-  do {
-    let stacks: DescribeStacksCommandOutput["Stacks"];
-    const command = new DescribeStacksCommand({ NextToken: nextToken });
-    ({ Stacks: stacks, NextToken: nextToken } = await cfClient.send(command));
-    if (stacks) {
-      allStacks.push(...stacks);
-    }
-  } while (nextToken);
-
-  writeFile(cacheFile, JSON.stringify(allStacks, null, 2));
-  return allStacks;
-}
-
-async function parseJSONFileOrNull<T>(path: Parameters<typeof readFile>["0"]): Promise<T | null> {
-  try {
-    return JSON.parse(await readFile(path, "utf8"));
-  } catch (error) {
-    if (
-      error instanceof Error &&
-      "syscall" in error &&
-      error.syscall === "open" &&
-      "code" in error &&
-      error.code == "ENOENT"
-    ) {
-      return null;
-    }
-
-    throw error;
-  }
-}
+main();
