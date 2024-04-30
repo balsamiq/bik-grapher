@@ -7,7 +7,7 @@ import {
   ListImportsCommand,
   Stack,
 } from "@aws-sdk/client-cloudformation";
-import { program } from "commander";
+import { program, Option } from "commander";
 import { appendFile, mkdir, readFile, writeFile } from "fs/promises";
 import madge from "madge";
 import { join as joinPath } from "path";
@@ -104,21 +104,35 @@ class FilesystemCache implements Cache {
   }
 }
 
+const INCLUDE_OPTION_CHOICES = ["mysql", "redis"] as const;
+type IncludeOptionChoice = (typeof INCLUDE_OPTION_CHOICES)[number];
+
 async function main() {
   let environment = ""; // making typescript happy
 
   program
     .argument("<environment>")
-    .option(
-      "-a, --app <app...>",
-      "useful to focus on one app's stacks only or to focus on relations between specific apps (can be specified multiple times)",
+    .addOption(
+      variadicOption(
+        "-a, --app <app>",
+        "useful to focus on one app's stacks only or to focus on relations between specific apps",
+      ),
+    )
+    .addOption(
+      variadicOption(
+        `--include <${INCLUDE_OPTION_CHOICES.join("|")}>`,
+        "by default some stacks are hidden to reduce verbosity of the output, but with this flag you can include those as well",
+      ).choices(INCLUDE_OPTION_CHOICES),
     )
     .action((environmentArg) => {
       environment = environmentArg;
     })
     .parse();
 
-  const { app: apps }: { app?: string[] } = program.opts();
+  const {
+    app: apps,
+    include: includes,
+  }: { app?: string[]; include?: IncludeOptionChoice[]; withMysqlAndRedis: boolean } = program.opts();
 
   mkdir(APP_OUTPUT_DIR, { recursive: true });
   mkdir(STACK_OUTPUT_DIR, { recursive: true });
@@ -137,7 +151,9 @@ async function main() {
     cloudFormation,
   );
 
-  const interestingStacks = [...stacks.values()].filter((stack) => isInterestingStack(stack, environment, apps));
+  const interestingStacks = [...stacks.values()].filter((stack) =>
+    isInterestingStack(stack, environment, apps, includes),
+  );
   for (const stack of interestingStacks) {
     if (!apps || apps.length > 1) {
       writeFile(joinPath(APP_OUTPUT_DIR, `${getNodeNameForApp(stack)}.js`), "");
@@ -155,7 +171,7 @@ async function main() {
     if (!exportingStack) {
       throw new Error(`Couldn't find stack '${eexport.ExportingStackId}'`);
     }
-    if (!isInterestingStack(exportingStack, environment, apps)) {
+    if (!isInterestingStack(exportingStack, environment, apps, includes)) {
       continue;
     }
 
@@ -164,7 +180,7 @@ async function main() {
       if (!importingStack) {
         throw new Error(`Couldn't find stack '${iimport}'`);
       }
-      if (!isInterestingStack(importingStack, environment, apps)) {
+      if (!isInterestingStack(importingStack, environment, apps, includes)) {
         continue;
       }
 
@@ -199,6 +215,16 @@ async function main() {
 
   const graph = await madge(STACK_OUTPUT_DIR);
   graph.image(`graph-stacks.png`);
+}
+
+function variadicOption(...params: ConstructorParameters<typeof Option>) {
+  if (params[1] /* description */) {
+    params[1] = `${params[1]} (can be specified multiple times)`;
+  }
+
+  const option = new Option(...params);
+  option.variadic = true;
+  return option;
 }
 
 function getNodeNameForApp(stack: Stack) {
@@ -256,7 +282,7 @@ async function getExportsWithImportingStacks(exports: Export[], cache: Cache, cf
   return result;
 }
 
-function isInterestingStack(stack: Stack, environment: string, apps?: string[]) {
+function isInterestingStack(stack: Stack, environment: string, apps?: string[], includes?: IncludeOptionChoice[]) {
   if (!stack.StackName) {
     // This should never happen, but just in case:
     throw new Error(`Invalid stack '${stack}'`);
@@ -273,8 +299,12 @@ function isInterestingStack(stack: Stack, environment: string, apps?: string[]) 
     /* Exclude some singleton stacks (i.e., cross-app&env) */ !/^(balsamiq-slack)$/.test(stack.StackName) &&
     /* Exclude some apps */ !/^(workflow-triggerer|autosavedreactionsforslack|acetaia|bottega)-/.test(stack.StackName);
 
-  // Checks that we may want to not apply in the future:
-  result = result && /* Exclude some resource-stacks */ !/-(mysql|redis)$/.test(stack.StackName);
+  if (!includes || !includes.includes("mysql")) {
+    result = result && /* Exclude mysql resource-stack */ !/-mysql$/.test(stack.StackName);
+  }
+  if (!includes || !includes.includes("redis")) {
+    result = result && /* Exclude redis resource-stack */ !/-redis$/.test(stack.StackName);
+  }
 
   return (
     result &&

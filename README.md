@@ -37,7 +37,7 @@ apt-get install graphviz  # on Ubuntu
 ## Help
 
 ```
-nvm use && npm start staging -- --help
+nvm use && npm start -- --help
 ```
 
 
@@ -57,19 +57,19 @@ For more than one app, this program will generate `graph-apps.png` and `graph-st
 First run, for staging environment, for all apps:
 
 ```
-rm -rf .cache/ .output/ *.png ; nvm use && AWS_PROFILE=b-everything-else AWS_REGION=eu-west-1 npm start staging
+rm -rf .cache/ .output/ *.png ; nvm use && AWS_PROFILE=<profile> AWS_REGION=eu-west-1 npm start staging
 ```
 
-Generate dependency graph for BAS & RTC, for staging environment, using existing cache:
+Generate dependency graph for BAS & RTC, for staging environment, using existing cache (NOTE: no need for `AWS_*` variables):
 
 ```
-rm -rf .output/ *.png ; nvm use && AWS_PROFILE=b-everything-else AWS_REGION=eu-west-1 && npm start staging -- --app bas --app rtc
+rm -rf .output/ *.png ; nvm use && npm start staging -- --app bas --app rtc
 ```
 
 Generate dependency graph for Cloud *production* only (NOTE: cleaning cache):
 
 ```
-rm -rf .cache/ .output/ *.png ; nvm use && AWS_PROFILE=b-production-products AWS_REGION=us-east-1 && npm start production -- --app cloud
+rm -rf .cache/ .output/ *.png ; nvm use && AWS_PROFILE=b-production-products AWS_REGION=us-east-1 npm start production -- --app cloud
 ```
 
 
