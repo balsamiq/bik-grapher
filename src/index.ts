@@ -108,6 +108,12 @@ const INCLUDE_OPTION_CHOICES = ["mysql", "redis"] as const;
 type IncludeOptionChoice = (typeof INCLUDE_OPTION_CHOICES)[number];
 
 async function main() {
+  const region = process.env.AWS_REGION;
+
+  if (!region) {
+    throw new Error("Region is missing");
+  }
+
   let environment = ""; // making typescript happy
 
   program
@@ -134,21 +140,71 @@ async function main() {
     include: includes,
   }: { app?: string[]; include?: IncludeOptionChoice[]; withMysqlAndRedis: boolean } = program.opts();
 
+  // ---------------------------------------------------------------------------
+
   mkdir(APP_OUTPUT_DIR, { recursive: true });
   mkdir(STACK_OUTPUT_DIR, { recursive: true });
 
+  // ---------------------------------------------------------------------------
+
   const cache = new FilesystemCache(CACHE_DIR);
+
+  // ---------------------------------------------------------------------------
+
+  await processCloudFormation(cache, { region }, environment, apps, includes);
+  if (region !== "us-east-1") {
+    await processCloudFormation(cache, { region: "us-east-1", implicit: true }, environment, apps, includes);
+  }
+
+  // ---------------------------------------------------------------------------
+
+  if (!apps || apps.length > 1) {
+    const graph = await madge(APP_OUTPUT_DIR);
+    graph.image(`graph-apps.png`);
+  }
+
+  const graph = await madge(STACK_OUTPUT_DIR);
+  graph.image(`graph-stacks.png`);
+}
+
+function variadicOption(...params: ConstructorParameters<typeof Option>) {
+  if (params[1] /* description */) {
+    params[1] = `${params[1]} (can be specified multiple times)`;
+  }
+
+  const option = new Option(...params);
+  option.variadic = true;
+  return option;
+}
+
+type RegionConfiguration = {
+  region: string;
+  implicit?: true;
+};
+
+async function processCloudFormation(
+  cache: Cache,
+  regionConfig: RegionConfiguration,
+  environment: string,
+  apps?: string[],
+  includes?: IncludeOptionChoice[],
+) {
   const cloudFormation = new CloudFormation(
     new CloudFormationClient({
+      region: regionConfig.region,
       maxAttempts: 10, // I increased this number, because the default (3) was not enough and was causing "Throttling: Rate exceeded" error
     }),
   );
 
-  const stacks = await getStacks(cache, cloudFormation);
+  const stacks = await getStacks(cache, cloudFormation, regionConfig.region);
   const exportsWithImportingStacks = await getExportsWithImportingStacks(
-    await cache.cacheOrWork("exports.cache.json", async () => await cloudFormation.listExports()),
+    await cache.cacheOrWork(
+      `${regionConfig.region}_exports.cache.json`,
+      async () => await cloudFormation.listExports(),
+    ),
     cache,
     cloudFormation,
+    regionConfig.region,
   );
 
   const interestingStacks = [...stacks.values()].filter((stack) =>
@@ -156,9 +212,9 @@ async function main() {
   );
   for (const stack of interestingStacks) {
     if (!apps || apps.length > 1) {
-      writeFile(joinPath(APP_OUTPUT_DIR, `${getNodeNameForApp(stack)}.js`), "");
+      writeFile(joinPath(APP_OUTPUT_DIR, `${getNodeNameForApp(stack, regionConfig)}.js`), "");
     }
-    writeFile(joinPath(STACK_OUTPUT_DIR, `${getNodeNameForStack(stack)}.js`), "");
+    writeFile(joinPath(STACK_OUTPUT_DIR, `${getNodeNameForStack(stack, regionConfig)}.js`), "");
   }
 
   for (const { export: eexport, imports } of exportsWithImportingStacks) {
@@ -189,7 +245,8 @@ async function main() {
 
       if (
         (!apps || apps.length > 1) &&
-        (exportingNode = getNodeNameForApp(exportingStack)) != (importingNode = getNodeNameForApp(importingStack))
+        (exportingNode = getNodeNameForApp(exportingStack, regionConfig)) !=
+          (importingNode = getNodeNameForApp(importingStack, regionConfig))
       ) {
         appendFile(
           joinPath(APP_OUTPUT_DIR, `${importingNode}.js`),
@@ -198,7 +255,8 @@ async function main() {
       }
 
       if (
-        (exportingNode = getNodeNameForStack(exportingStack)) != (importingNode = getNodeNameForStack(importingStack))
+        (exportingNode = getNodeNameForStack(exportingStack, regionConfig)) !=
+        (importingNode = getNodeNameForStack(importingStack, regionConfig))
       ) {
         appendFile(
           joinPath(STACK_OUTPUT_DIR, `${importingNode}.js`),
@@ -207,40 +265,22 @@ async function main() {
       }
     }
   }
-
-  if (!apps || apps.length > 1) {
-    const graph = await madge(APP_OUTPUT_DIR);
-    graph.image(`graph-apps.png`);
-  }
-
-  const graph = await madge(STACK_OUTPUT_DIR);
-  graph.image(`graph-stacks.png`);
 }
 
-function variadicOption(...params: ConstructorParameters<typeof Option>) {
-  if (params[1] /* description */) {
-    params[1] = `${params[1]} (can be specified multiple times)`;
-  }
-
-  const option = new Option(...params);
-  option.variadic = true;
-  return option;
-}
-
-function getNodeNameForApp(stack: Stack) {
+function getNodeNameForApp(stack: Stack, regionConfig: RegionConfiguration) {
   const appName = getTagValue(stack, "balsamiq-product");
   const environment = getTagValue(stack, "environment");
   if (appName && environment) {
-    return `${appName}-${environment}`;
+    return `${appName}-${environment}${regionConfig.implicit ? ` (${regionConfig.region})` : ""}`;
   } else if (stack.StackName) {
-    return stack.StackName;
+    return `${stack.StackName}${regionConfig.implicit ? ` (${regionConfig.region})` : ""}`;
   }
   throw new Error(`Invalid stack '${stack}'`);
 }
 
-function getNodeNameForStack(stack: Stack) {
+function getNodeNameForStack(stack: Stack, regionConfig: RegionConfiguration) {
   if (stack.StackName) {
-    return stack.StackName;
+    return `${stack.StackName}${regionConfig.implicit ? ` (${regionConfig.region})` : ""}`;
   }
   throw new Error(`Invalid stack '${stack}'`);
 }
@@ -264,12 +304,17 @@ function getTagValue(stack: Stack, key: string) {
   return tag.Value;
 }
 
-async function getExportsWithImportingStacks(exports: Export[], cache: Cache, cfClient: CloudFormation) {
+async function getExportsWithImportingStacks(
+  exports: Export[],
+  cache: Cache,
+  cfClient: CloudFormation,
+  region: string,
+) {
   const result: { export: Export; imports: string[] }[] = [];
   for (const eexport of exports) {
     result.push({
       export: eexport,
-      imports: await cache.cacheOrWork(`cfListImports-${eexport.Name}`, () => {
+      imports: await cache.cacheOrWork(`${region}_cfListImports-${eexport.Name}`, () => {
         if (!eexport.Name) {
           // This should never happen, but just in case:
           throw new Error(`Invalid export '${eexport}'`);
@@ -313,8 +358,8 @@ function isInterestingStack(stack: Stack, environment: string, apps?: string[], 
   );
 }
 
-async function getStacks(cache: Cache, cfClient: CloudFormation) {
-  const stacks = await cache.cacheOrWork("stacks.cache.json", async () => await cfClient.describeStacks());
+async function getStacks(cache: Cache, cfClient: CloudFormation, region: string) {
+  const stacks = await cache.cacheOrWork(`${region}_stacks.cache.json`, async () => await cfClient.describeStacks());
 
   const result = stacks.reduce((result, stack) => {
     if (!stack.StackId || !stack.StackName) {
