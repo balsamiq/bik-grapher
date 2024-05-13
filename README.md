@@ -16,8 +16,8 @@ However, if you look at BAS and RTCs individual stacks in more detail;
 You can see there's a viable deployment path for these two apps:
 
 1. Deploy BAS's config stack
-2. Deploy RTC's config stack
-3. Now you can deploy the rest of BAS and RTC apps
+2. Deploy the RTC app
+3. Deploy the rest of the BAS app
 
 
 ## Getting going
