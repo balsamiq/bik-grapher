@@ -110,10 +110,6 @@ type IncludeOptionChoice = (typeof INCLUDE_OPTION_CHOICES)[number];
 async function main() {
   const region = process.env.AWS_REGION;
 
-  if (!region) {
-    throw new Error("Region is missing");
-  }
-
   let environment = ""; // making typescript happy
 
   program
@@ -178,7 +174,7 @@ function variadicOption(...params: ConstructorParameters<typeof Option>) {
 }
 
 type RegionConfiguration = {
-  region: string;
+  region?: string;
   implicit?: true;
 };
 
@@ -308,7 +304,7 @@ async function getExportsWithImportingStacks(
   exports: Export[],
   cache: Cache,
   cfClient: CloudFormation,
-  region: string,
+  region?: string,
 ) {
   const result: { export: Export; imports: string[] }[] = [];
   for (const eexport of exports) {
@@ -358,7 +354,7 @@ function isInterestingStack(stack: Stack, environment: string, apps?: string[], 
   );
 }
 
-async function getStacks(cache: Cache, cfClient: CloudFormation, region: string) {
+async function getStacks(cache: Cache, cfClient: CloudFormation, region?: string) {
   const stacks = await cache.cacheOrWork(`${region}_stacks.cache.json`, async () => await cfClient.describeStacks());
 
   const result = stacks.reduce((result, stack) => {
